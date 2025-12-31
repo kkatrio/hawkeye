@@ -1,6 +1,8 @@
 mod frigate;
 mod gdrive;
 
+mod ipc;
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     //let events: Vec<Event> = Vec::new();
@@ -23,6 +25,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let event_name = event.get_name();
 
                     if !uploaded.1.contains(&event_name) {
+                        // send alarm notification
+                        if ipc::send_alarm_notification(ipc::Message::NewEvent).is_err() {
+                            eprintln!("Error: Did not connect to olympus");
+                        };
+                        // upload screenshot
                         match client.get_event_snapshot(&event).await {
                             Ok(path) => {
                                 match gclient.upload(&event_name, path, &folder_id).await {
