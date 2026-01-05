@@ -23,11 +23,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     println!("{event}");
 
                     let event_name = event.get_name();
+                    let camera = event.get_camera();
 
                     if !uploaded.1.contains(&event_name) {
                         // send alarm notification
-                        if ipc::send_alarm_notification(ipc::Message::NewEvent).is_err() {
-                            eprintln!("Error: Did not connect to olympus");
+                        if let Some(e) =
+                            ipc::send_alarm_notification(ipc::NewEvent { camera }).err()
+                        {
+                            eprintln!("Error: Did not connect to olympus: {}", e);
                         };
                         // upload screenshot
                         match client.get_event_snapshot(&event).await {
@@ -52,7 +55,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             Err(e) => {
                 eprintln!("Did not get events: {}", e);
-                continue;
             }
         };
 

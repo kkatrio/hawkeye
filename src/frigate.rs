@@ -73,7 +73,8 @@ pub struct Event {
 impl Event {
     // hour:min:sec-camera-day:month
     pub fn get_name(&self) -> String {
-        let dt = Local
+        let offset = chrono::FixedOffset::east_opt(2 * 60 * 60).unwrap();
+        let dt = Local::from_offset(&offset)
             .timestamp_opt(self.start_time.trunc() as i64, 0)
             .unwrap();
         format!(
@@ -85,6 +86,10 @@ impl Event {
             dt.day(),
             dt.month(),
         )
+    }
+
+    pub fn get_camera(&self) -> String {
+        self.camera.clone()
     }
 }
 
@@ -159,10 +164,17 @@ impl Client {
             .get("http://192.168.1.30:8971/api/events?limit=10")
             .bearer_auth(&self.token)
             .send()
-            .await
-            .unwrap();
+            .await?;
 
-        let events = serde_json::from_str(&res.text().await?)?;
+        let status = res.status();
+        let text = res.text().await?;
+
+        if status != reqwest::StatusCode::OK {
+            let emsg = format!("get events failed with {}. body: {}", status, text);
+            return Err(emsg.into());
+        }
+
+        let events = serde_json::from_str(&text)?;
         Ok(events)
     }
 
