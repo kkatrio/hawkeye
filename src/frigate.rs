@@ -73,8 +73,7 @@ pub struct Event {
 impl Event {
     // hour:min:sec-camera-day:month
     pub fn get_name(&self) -> String {
-        let offset = chrono::FixedOffset::east_opt(2 * 60 * 60).unwrap();
-        let dt = Local::from_offset(&offset)
+        let dt = Local
             .timestamp_opt(self.start_time.trunc() as i64, 0)
             .unwrap();
         format!(
@@ -116,6 +115,7 @@ fn timestamp_to_iso(ts: f64) -> String {
 pub struct Client {
     client: reqwest::Client,
     token: String,
+    frigate_ip: String,
 }
 
 impl Client {
@@ -125,11 +125,12 @@ impl Client {
         dotenv::dotenv().ok();
         let frigate_user = dotenv::var("FRIGATE_ADMIN").expect("FRIGATE_ADMIN must be set in .env");
         let frigate_pass = dotenv::var("FRIGATE_PASS").expect("FRIGATE_PASS must be set in .env");
+        let frigate_ip = dotenv::var("FRIGATE_IP").expect("FRIGATE_IP must be set in .env");
 
         // login
         let login_data = serde_json::json!({"user": frigate_user, "password": frigate_pass});
         let res = client
-            .post("http://192.168.1.30:8971/api/login")
+            .post(format!("http://{}:8971/api/login", frigate_ip))
             .json(&login_data)
             .send()
             .await?;
@@ -142,14 +143,18 @@ impl Client {
             .value()
             .to_string();
 
-        Ok(Self { client, token })
+        Ok(Self {
+            client,
+            token,
+            frigate_ip,
+        })
     }
 
     #[allow(dead_code)]
     async fn get_review(&self) -> Result<Vec<Review>, Box<dyn std::error::Error>> {
         let res = self
             .client
-            .get("http://192.168.1.30:8971/api/review")
+            .get(format!("http://{}:8971/api/review", self.frigate_ip))
             .bearer_auth(&self.token)
             .send()
             .await
@@ -161,7 +166,10 @@ impl Client {
     pub async fn get_events(&self) -> Result<Vec<Event>, Box<dyn std::error::Error>> {
         let res = self
             .client
-            .get("http://192.168.1.30:8971/api/events?limit=10")
+            .get(format!(
+                "http://{}:8971/api/events?limit=10",
+                self.frigate_ip
+            ))
             .bearer_auth(&self.token)
             .send()
             .await?;
@@ -185,8 +193,8 @@ impl Client {
         let res = self
             .client
             .get(format!(
-                "http://192.168.1.30:8971/api/events/{}/snapshot.jpg",
-                event.id
+                "http://{}:8971/api/events/{}/snapshot.jpg",
+                self.frigate_ip, event.id
             ))
             .bearer_auth(&self.token)
             .send()
@@ -204,7 +212,10 @@ impl Client {
     async fn get_motion_activity(&self) -> Result<Vec<Motion>, Box<dyn std::error::Error>> {
         let res = self
             .client
-            .get("http://192.168.1.30:8971/api/review/activity/motion")
+            .get(format!(
+                "http://{}:8971/api/review/activity/motion",
+                self.frigate_ip
+            ))
             .bearer_auth(&self.token)
             .send()
             .await

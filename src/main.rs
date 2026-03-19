@@ -17,6 +17,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let folder_id = uploaded.0;
 
     loop {
+        // TODO: get_events will be unothorized upon frigate restart.
+        // In case of 401, login again.
         match client.get_events().await {
             Ok(events) => {
                 for event in events {

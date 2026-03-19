@@ -1,4 +1,4 @@
-FROM rust:alpine3.23
+FROM rust:alpine3.22
 
 RUN mkdir /home/hawkeye
 WORKDIR /home/hawkeye
@@ -11,6 +11,11 @@ RUN apk add pkgconfig
 RUN apk add openssl-dev
 RUN apk add openssl-libs-static
 RUN apk add libgcrypt
+
+ENV TZ=Europe/Athens
+RUN apk add --no-cache tzdata && \
+    ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && \
+    echo $TZ > /etc/timezone
 
 RUN cargo install --path .
 
