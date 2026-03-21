@@ -38,7 +38,8 @@ impl NewEvent {
 
 // printf "\x01\x00\x00\x05" | nc 127.0.0.1 8080
 pub fn send_alarm_notification(message: NewEvent) -> std::io::Result<()> {
-    let mut addrs_iter = "olympus:8080".to_socket_addrs().unwrap();
+    // note: use 0.0.0.0 from the host
+    let mut addrs_iter = "olympus:8080".to_socket_addrs()?;
     let addr = addrs_iter
         .next()
         .expect("addr must be created out of the domain");
@@ -47,7 +48,7 @@ pub fn send_alarm_notification(message: NewEvent) -> std::io::Result<()> {
 
     stream.write_all(&message.bytes())?;
     let mut buf = [0u8; 2];
-    // dot not block for much. The reply from olympus is instant, since the events there are
+    // The reply from olympus is instant since the events there are
     // handled asynchronously.
     let _ = stream.read(&mut buf)?;
     if buf != "ok".as_bytes() {

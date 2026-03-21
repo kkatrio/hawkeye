@@ -1,13 +1,38 @@
+use std::error::Error;
+use tracing::{error, info};
+
 mod frigate;
 mod gdrive;
-
 mod ipc;
+
+use frigate::FrigateError;
+use tracing_subscriber::util::SubscriberInitExt;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    //let events: Vec<Event> = Vec::new();
+    tracing_subscriber::fmt()
+        .compact()
+        .with_file(true)
+        .with_line_number(true)
+        .with_target(false)
+        .finish()
+        .init();
 
-    let client = frigate::Client::new().await.unwrap();
+    let client = match frigate::Client::new().await {
+        Ok(client) => client,
+        Err(FrigateError::LoginFailed(e)) => {
+            error!("Could not reach frigate: {e}, {:?}", e.source());
+            std::process::exit(1);
+        }
+        Err(FrigateError::TokenMissing) => {
+            error!("Frigate did not issue token");
+            std::process::exit(1);
+        }
+        Err(_) => {
+            unreachable!()
+        }
+    };
+
     let gclient = gdrive::GClient::new();
 
     // (folder_id, event_names)
@@ -17,12 +42,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let folder_id = uploaded.0;
 
     loop {
-        // TODO: get_events will be unothorized upon frigate restart.
-        // In case of 401, login again.
         match client.get_events().await {
             Ok(events) => {
                 for event in events {
-                    println!("{event}");
+                    info!("{event}");
 
                     let event_name = event.get_name();
                     let camera = event.get_camera();
@@ -32,37 +55,39 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         if let Some(e) =
                             ipc::send_alarm_notification(ipc::NewEvent { camera }).err()
                         {
-                            eprintln!("Error: Did not connect to olympus: {}", e);
+                            error!(
+                                "Alarm notification not sent -- Did not connect to olympus: {}",
+                                e
+                            );
                         };
                         // upload screenshot
                         match client.get_event_snapshot(&event).await {
                             Ok(path) => {
                                 match gclient.upload(&event_name, path, &folder_id).await {
                                     Ok(_) => {
-                                        println!("uploaded: {}", event_name);
+                                        info!("uploaded: {}", event_name);
                                         uploaded.1.push(event_name);
                                     }
                                     Err(e) => {
-                                        eprintln!("Error: Did not upload event to gdrive: {}", e);
+                                        error!("Error: Did not upload event to gdrive: {}", e);
                                         continue;
                                     }
                                 };
                             }
                             Err(e) => {
-                                eprintln!("Did not get event snapshot: {}", e);
+                                error!("Did not get event snapshot: {}", e);
                             }
                         };
                     }
                 }
             }
             Err(e) => {
-                eprintln!("Did not get events: {}", e);
+                error!("frigate error: {}", e);
             }
         };
-
-        println!("uploaded events: {}", uploaded.1.len());
+        info!("uploaded events: {}", uploaded.1.len());
         std::thread::sleep(std::time::Duration::from_secs(10));
     }
 
-    // TODO: delete uploaded events
+    // TODO: delete old events
 }
