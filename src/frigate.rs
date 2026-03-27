@@ -223,7 +223,7 @@ impl Client {
     }
 
     pub async fn get_events(&self) -> Result<Vec<Event>, FrigateError> {
-        let url = format!("http://{}:8971/api/events?limit=10", self.frigate_ip);
+        let url = format!("http://{}:8971/api/events?limit=2", self.frigate_ip);
         self.get(&url).await
     }
 

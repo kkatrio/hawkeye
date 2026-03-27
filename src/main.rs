@@ -8,6 +8,28 @@ mod ipc;
 use frigate::FrigateError;
 use tracing_subscriber::util::SubscriberInitExt;
 
+async fn connect_frigate() -> frigate::Client {
+    loop {
+        match frigate::Client::new().await {
+            Ok(client) => {
+                info!("Connected to frigate");
+                return client;
+            }
+            Err(FrigateError::LoginFailed(e)) => {
+                error!("Could not reach frigate: {e}, {:?}", e.source());
+                // keep restarting until able to login.
+            }
+            Err(FrigateError::TokenMissing) => {
+                error!("Frigate did not issue token");
+            }
+            Err(_) => {
+                unreachable!()
+            }
+        };
+        std::thread::sleep(std::time::Duration::from_secs(10));
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
@@ -18,21 +40,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .finish()
         .init();
 
-    let client = match frigate::Client::new().await {
-        Ok(client) => client,
-        Err(FrigateError::LoginFailed(e)) => {
-            error!("Could not reach frigate: {e}, {:?}", e.source());
-            std::process::exit(1);
-        }
-        Err(FrigateError::TokenMissing) => {
-            error!("Frigate did not issue token");
-            std::process::exit(1);
-        }
-        Err(_) => {
-            unreachable!()
-        }
-    };
-
+    let client = connect_frigate().await;
     let gclient = gdrive::GClient::new();
 
     // (folder_id, event_names)
