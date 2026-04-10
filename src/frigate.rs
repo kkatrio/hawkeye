@@ -5,7 +5,7 @@ use std::io::prelude::*;
 use std::sync::Arc;
 use std::{fmt, path::PathBuf};
 use tokio::sync::Mutex;
-use tracing::warn;
+use tracing::{info, warn};
 
 mod error;
 pub use error::*;
@@ -176,6 +176,7 @@ impl Client {
             &self.frigate_ip,
         )
         .await?;
+        info!("login completed");
         *self.token.lock().await = token;
         Ok(())
     }
@@ -184,10 +185,11 @@ impl Client {
         &self,
         build_request: impl Fn(&str) -> reqwest::RequestBuilder,
     ) -> Result<reqwest::Response, FrigateError> {
-        let token = self.token.lock().await;
-
-        // RequestFailed is emmited if frigate is missing
-        let res = build_request(&token).send().await?;
+        let res = {
+            let token = self.token.lock().await;
+            // RequestFailed is emitted if frigate is missing
+            build_request(&token).send().await?
+        };
 
         // if frigate has restarted refresh the token
         if res.status().is_client_error() {
