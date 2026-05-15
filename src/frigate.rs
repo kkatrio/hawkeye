@@ -191,7 +191,7 @@ impl Client {
             build_request(&token).send().await?
         };
 
-        // if frigate has restarted refresh the token
+        // if frigate has been restarted refresh the token
         if res.status().is_client_error() {
             warn!("unauthenticated. Refreshing token...");
             self.refresh_token().await?;
@@ -216,6 +216,18 @@ impl Client {
             .send_with_auth_retry(|token| self.client.get(url).bearer_auth(token))
             .await?;
         Ok(serde_json::from_str(&res.text().await?)?)
+    }
+
+    async fn put(&self, url: &str, data: &serde_json::Value) -> Result<(), FrigateError> {
+        self.send_with_auth_retry(|token| {
+            self.client
+                .put(url)
+                .bearer_auth(token)
+                .json(data)
+                .header("Accept", "application/json")
+        })
+        .await?;
+        Ok(())
     }
 
     #[allow(dead_code)]
@@ -250,5 +262,10 @@ impl Client {
         let mut file = File::create(&path)?;
         file.write_all(&res.bytes().await?)?;
         Ok(path)
+    }
+
+    pub async fn update_config(&self, config: &serde_json::Value) -> Result<(), FrigateError> {
+        let url = format!("http://{}:8971/api/config/set", self.frigate_ip);
+        self.put(&url, config).await
     }
 }

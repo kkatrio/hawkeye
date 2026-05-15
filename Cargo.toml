@@ -13,3 +13,4 @@ tokio = { version = "1.0", features = ["macros", "rt-multi-thread"] }
 dotenv = "0.15.0"
 tracing = "0.1"
 tracing-subscriber = "0.3"
+cron = "0.16"
