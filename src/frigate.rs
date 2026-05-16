@@ -72,7 +72,7 @@ pub struct Event {
     label: String,
     zones: Vec<String>,
     start_time: f64,
-    end_time: f64,
+    end_time: Option<f64>,
     data: EventData,
 }
 
@@ -106,7 +106,7 @@ impl fmt::Display for Event {
             self.data.max_severity,
             self.label,
             timestamp_to_iso(self.start_time),
-            timestamp_to_iso(self.end_time)
+            timestamp_to_iso(self.end_time.unwrap_or(0.0))
         )
     }
 }
@@ -130,7 +130,6 @@ impl Client {
     pub async fn new() -> Result<Self, FrigateError> {
         let client = reqwest::Client::new();
 
-        dotenv::dotenv().ok();
         let frigate_user = dotenv::var("FRIGATE_ADMIN").expect("FRIGATE_ADMIN must be set in .env");
         let frigate_pass = dotenv::var("FRIGATE_PASS").expect("FRIGATE_PASS must be set in .env");
         let frigate_ip = dotenv::var("FRIGATE_IP").expect("FRIGATE_IP must be set in .env");

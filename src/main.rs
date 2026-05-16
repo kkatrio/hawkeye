@@ -152,6 +152,11 @@ async fn main_notification_loop(
     // TODO: decouple internet connectivity to local ipc notifications
     // maybe a different thread for gdrive sharing uploaded
 
+    let http_frequency = dotenv::var("HTTP_FREQUENCY")
+        .expect("HTTP_FREQUENCY must be set in .env")
+        .parse::<u64>()
+        .expect("unable to parse http frequency to u64");
+
     // uploaded events are identified with a unique event_name (camera-hour:min:sec-day:month)
     let mut uploaded: Vec<String> = match gclient.get_uploaded_events().await {
         Ok(upevents) => upevents,
@@ -169,12 +174,11 @@ async fn main_notification_loop(
         match client.get_events().await {
             Ok(events) => {
                 for event in events {
-                    info!("{event}");
-
                     let event_name = event.get_name();
                     let camera = event.get_camera();
-
                     if !uploaded.contains(&event_name) {
+                        // new event
+                        info!("new event: {event}");
                         // send alarm notification
                         if let Some(e) =
                             // blocks max 2 seconds if connection timeout
@@ -210,7 +214,7 @@ async fn main_notification_loop(
                 error!("frigate error: {}", e);
             }
         };
-        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+        tokio::time::sleep(std::time::Duration::from_secs(http_frequency)).await;
     }
 }
 
@@ -223,6 +227,8 @@ async fn main() {
         .with_target(false)
         .finish()
         .init();
+
+    dotenv::dotenv().ok();
 
     let gclient = match gdrive::GClient::new().await {
         Ok(gclient) => gclient,
