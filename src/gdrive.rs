@@ -130,6 +130,7 @@ impl GClient {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub async fn get_uploaded_events(&self) -> Result<Vec<String>, GClientError> {
         /*
          set Q "'${FOLDER_ID}' in parents and trashed=false"

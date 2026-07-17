@@ -11,15 +11,40 @@ mod error;
 pub use error::*;
 
 #[derive(Deserialize, Debug)]
-struct EventData {
-    max_severity: String,
+pub(crate) struct After {
+    pub id: String,
+    pub camera: String,
+    //label: String,
+    start_time: f64,
 }
 
-//#[derive(Deserialize, Debug)]
-//struct ReviewData {
-//    objects: Vec<String>,
-//    zones: Vec<String>,
-//}
+#[derive(Deserialize, Debug)]
+#[serde(tag = "type")]
+#[serde(rename_all = "lowercase")]
+pub enum Event {
+    New { after: After },
+    Update {},
+    End { after: After },
+}
+
+impl After {
+    // TODO: return a Result
+    // hour:min:sec-camera-day:month
+    pub fn get_name(&self) -> String {
+        let dt = Local
+            .timestamp_opt(self.start_time.trunc() as i64, 0)
+            .unwrap();
+        format!(
+            "{}:{}:{}-{}-{}-{}.jpg",
+            dt.hour(),
+            dt.minute(),
+            dt.second(),
+            self.camera,
+            dt.day(),
+            dt.month(),
+        )
+    }
+}
 
 #[allow(dead_code)]
 #[derive(Deserialize, Debug)]
@@ -60,53 +85,6 @@ impl fmt::Display for Review {
             self.severity,
             timestamp_to_iso(self.start_time),
             timestamp_to_iso(self.end_time)
-        )
-    }
-}
-
-#[allow(dead_code)]
-#[derive(Deserialize, Debug)]
-pub struct Event {
-    id: String,
-    camera: String,
-    label: String,
-    zones: Vec<String>,
-    start_time: f64,
-    end_time: Option<f64>,
-    data: EventData,
-}
-
-impl Event {
-    // hour:min:sec-camera-day:month
-    pub fn get_name(&self) -> String {
-        let dt = Local
-            .timestamp_opt(self.start_time.trunc() as i64, 0)
-            .unwrap();
-        format!(
-            "{}:{}:{}-{}-{}-{}.jpg",
-            dt.hour(),
-            dt.minute(),
-            dt.second(),
-            self.camera,
-            dt.day(),
-            dt.month(),
-        )
-    }
-
-    pub fn get_camera(&self) -> String {
-        self.camera.clone()
-    }
-}
-
-impl fmt::Display for Event {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{}, {}, start: {} end: {}",
-            self.data.max_severity,
-            self.label,
-            timestamp_to_iso(self.start_time),
-            timestamp_to_iso(self.end_time.unwrap_or(0.0))
         )
     }
 }
@@ -191,6 +169,7 @@ impl Client {
         };
 
         // if frigate has been restarted refresh the token
+        // TODO: log the error, refresh for any kind of error
         if res.status().is_client_error() {
             warn!("unauthenticated. Refreshing token...");
             self.refresh_token().await?;
@@ -235,21 +214,16 @@ impl Client {
         self.get(&url).await
     }
 
-    pub async fn get_events(&self) -> Result<Vec<Event>, FrigateError> {
-        let url = format!("http://{}:8971/api/events?limit=2", self.frigate_ip);
-        self.get(&url).await
-    }
-
     #[allow(dead_code)]
     async fn get_motion_activity(&self) -> Result<Vec<Motion>, FrigateError> {
         let url = format!("http://{}:8971/api/review/activity/motion", self.frigate_ip);
         self.get(&url).await
     }
 
-    pub async fn get_event_snapshot(&self, event: &Event) -> Result<PathBuf, ClientError> {
+    pub async fn get_event_snapshot(&self, after_event: &After) -> Result<PathBuf, ClientError> {
         let url = format!(
             "http://{}:8971/api/events/{}/snapshot.jpg",
-            self.frigate_ip, event.id
+            self.frigate_ip, after_event.id
         );
 
         let res = self
@@ -257,7 +231,7 @@ impl Client {
             .await?;
 
         let mut path = PathBuf::from(r"./media");
-        path.push(format!("{}.jpg", event.get_name()));
+        path.push(format!("{}.jpg", after_event.get_name()));
         let mut file = File::create(&path)?;
         file.write_all(&res.bytes().await?)?;
         Ok(path)

@@ -37,7 +37,7 @@ impl NewEvent {
 }
 
 // printf "\x01\x00\x00\x05" | nc 127.0.0.1 8080
-pub fn send_alarm_notification(message: NewEvent) -> std::io::Result<()> {
+pub async fn send_alarm_notification(message: NewEvent) -> std::io::Result<()> {
     // note: use 0.0.0.0 from the host
     let mut addrs_iter = "olympus:8080".to_socket_addrs()?;
     let addr = addrs_iter

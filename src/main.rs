@@ -1,6 +1,7 @@
 use std::error::Error;
 use std::str::FromStr;
 use tracing::{error, info, warn};
+use tracing_subscriber::util::SubscriberInitExt;
 
 mod frigate;
 mod gdrive;
@@ -9,7 +10,9 @@ mod ipc;
 use crate::gdrive::GClientError;
 use frigate::FrigateError;
 use std::sync::Arc;
-use tracing_subscriber::util::SubscriberInitExt;
+
+use rumqttc::{AsyncClient, MqttOptions, QoS};
+use std::time::Duration;
 
 // lower threshold at 20:00
 // increase threshold at 07:00
@@ -145,57 +148,54 @@ async fn connect_frigate() -> frigate::Client {
     }
 }
 
-async fn main_notification_loop(
-    client: Arc<frigate::Client>,
-    gclient: Arc<gdrive::GClient>,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    // TODO: decouple internet connectivity to local ipc notifications
-    // maybe a different thread for gdrive sharing uploaded
+async fn main_mqtt_subscriber(fclient: Arc<frigate::Client>, gclient: Arc<gdrive::GClient>) {
+    let mut mqttoptions = MqttOptions::new("hawkeye", "mosquitto", 1883);
+    mqttoptions.set_keep_alive(Duration::from_secs(5));
 
-    let http_frequency = dotenv::var("HTTP_FREQUENCY")
-        .expect("HTTP_FREQUENCY must be set in .env")
-        .parse::<u64>()
-        .expect("unable to parse http frequency to u64");
-
-    // uploaded events are identified with a unique event_name (camera-hour:min:sec-day:month)
-    let mut uploaded: Vec<String> = match gclient.get_uploaded_events().await {
-        Ok(upevents) => upevents,
-        Err(GClientError::ReqwestError) => {
-            error!("request error");
-            panic!();
-        }
-        Err(GClientError::SerdeError(e)) => {
-            error!("serde error: {e}");
-            panic!();
-        }
-    };
+    let (client, mut eventloop) = AsyncClient::new(mqttoptions, 10);
+    client
+        .subscribe("frigate/events", QoS::AtMostOnce)
+        .await
+        .unwrap();
 
     loop {
-        match client.get_events().await {
-            Ok(events) => {
-                for event in events {
-                    let event_name = event.get_name();
-                    let camera = event.get_camera();
-                    if !uploaded.contains(&event_name) {
-                        // new event
-                        info!("new event: {event}");
-                        // send alarm notification
-                        if let Some(e) =
-                            // blocks max 2 seconds if connection timeout
-                            ipc::send_alarm_notification(ipc::NewEvent { camera }).err()
-                        {
+        let event = eventloop.poll().await;
+
+        match event {
+            Ok(rumqttc::Event::Incoming(rumqttc::Packet::Publish(p))) => {
+                let fe: frigate::Event = match serde_json::from_slice(&p.payload) {
+                    Ok(msg) => {
+                        info!("msg received: {:?}", msg);
+                        msg
+                    }
+                    Err(e) => {
+                        error!("could not deserialize event received: {}", e);
+                        continue;
+                    }
+                };
+                match fe {
+                    frigate::Event::New { after } => {
+                        let res = tokio::spawn(ipc::send_alarm_notification(ipc::NewEvent {
+                            camera: after.camera,
+                        }));
+
+                        if let Err(e) = res.await {
                             error!(
                                 "Alarm notification not sent -- Did not connect to olympus: {}",
                                 e
-                            );
-                        };
-                        // upload screenshot
-                        match client.get_event_snapshot(&event).await {
+                            )
+                        }
+                    }
+                    frigate::Event::Update { .. } => {
+                        continue;
+                    }
+                    frigate::Event::End { after } => {
+                        match fclient.get_event_snapshot(&after).await {
                             Ok(path) => {
+                                let event_name = after.get_name();
                                 match gclient.upload(&event_name, path).await {
                                     Ok(_) => {
                                         info!("uploaded: {}", event_name);
-                                        uploaded.push(event_name);
                                     }
                                     Err(e) => {
                                         error!("Error: Did not upload event to gdrive: {}", e);
@@ -210,11 +210,11 @@ async fn main_notification_loop(
                     }
                 }
             }
+            Ok(_) => {}
             Err(e) => {
-                error!("frigate error: {}", e);
+                error!("mqtt error: {}", e)
             }
-        };
-        tokio::time::sleep(std::time::Duration::from_secs(http_frequency)).await;
+        }
     }
 }
 
@@ -260,6 +260,6 @@ async fn main() {
         client.clone(),
     ));
 
-    let mh = tokio::spawn(main_notification_loop(client.clone(), gclient.clone()));
+    let mh = tokio::spawn(main_mqtt_subscriber(client.clone(), gclient.clone()));
     let _ = tokio::join!(mh, lh, ih, dh);
 }
