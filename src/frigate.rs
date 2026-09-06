@@ -16,6 +16,10 @@ pub(crate) struct After {
     pub camera: String,
     //label: String,
     start_time: f64,
+    //position_changes: u16,
+    //score: f64,
+    has_snapshot: bool,
+    //active: bool,
 }
 
 #[derive(Deserialize, Debug)]
@@ -221,6 +225,9 @@ impl Client {
     }
 
     pub async fn get_event_snapshot(&self, after_event: &After) -> Result<PathBuf, ClientError> {
+        if !after_event.has_snapshot {
+            return Err(ClientError::Frigate(FrigateError::SnapshotMissing));
+        }
         let url = format!(
             "http://{}:8971/api/events/{}/snapshot.jpg",
             self.frigate_ip, after_event.id

@@ -43,6 +43,7 @@ pub async fn send_alarm_notification(message: NewEvent) -> std::io::Result<()> {
     let addr = addrs_iter
         .next()
         .expect("addr must be created out of the domain");
+    // TODO: persist connection
     let mut stream = TcpStream::connect_timeout(&addr, Duration::from_secs(2))?;
     println!("connected to olympus");
 

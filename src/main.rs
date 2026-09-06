@@ -102,6 +102,7 @@ async fn config_updater(expression: &str, time: Time, client: Arc<frigate::Clien
 }
 
 async fn delete_old(gclient: Arc<gdrive::GClient>) {
+    let mut interval = 6;
     loop {
         info!("deleting old events");
         match gclient.get_uploaded_events_reverse().await {
@@ -110,7 +111,11 @@ async fn delete_old(gclient: Arc<gdrive::GClient>) {
                 info!("deleted: {deleted} files");
                 // list gdrive api fetches 100 events
                 if deleted == 100 {
-                    warn!("must delete more frequently");
+                    warn!("more than 100 files to delete -- changing delete interval to 1 hour.");
+                    interval = 1;
+                } else if deleted < 100 && interval == 1 {
+                    warn!("deleted less than 100 -- changing delete interval back to 6 hours.");
+                    interval = 6;
                 }
             }
             Err(GClientError::ReqwestError) => {
@@ -122,7 +127,7 @@ async fn delete_old(gclient: Arc<gdrive::GClient>) {
                 panic!();
             }
         };
-        tokio::time::sleep(std::time::Duration::from_hours(6)).await;
+        tokio::time::sleep(std::time::Duration::from_hours(interval)).await;
     }
 }
 
@@ -153,10 +158,9 @@ async fn main_mqtt_subscriber(fclient: Arc<frigate::Client>, gclient: Arc<gdrive
     mqttoptions.set_keep_alive(Duration::from_secs(5));
 
     let (client, mut eventloop) = AsyncClient::new(mqttoptions, 10);
-    client
-        .subscribe("frigate/events", QoS::AtMostOnce)
-        .await
-        .unwrap();
+    if let Err(e) = client.subscribe("frigate/events", QoS::AtMostOnce).await {
+        error!("Failed to subscribe: {}", e);
+    }
 
     loop {
         let event = eventloop.poll().await;
@@ -210,9 +214,17 @@ async fn main_mqtt_subscriber(fclient: Arc<frigate::Client>, gclient: Arc<gdrive
                     }
                 }
             }
+            // poll will reconnect to the broker on connection drop
+            Ok(rumqttc::Event::Incoming(rumqttc::Packet::ConnAck(..))) => {
+                info!("Connection re-established");
+                if let Err(e) = client.subscribe("frigate/events", QoS::AtMostOnce).await {
+                    error!("Failed to subscribe: {}", e);
+                }
+            }
             Ok(_) => {}
             Err(e) => {
-                error!("mqtt error: {}", e)
+                error!("mqtt error: {}", e);
+                tokio::time::sleep(Duration::from_secs(3)).await;
             }
         }
     }
@@ -220,11 +232,14 @@ async fn main_mqtt_subscriber(fclient: Arc<frigate::Client>, gclient: Arc<gdrive
 
 #[tokio::main]
 async fn main() {
+    let timeformat = tracing_subscriber::fmt::time::ChronoLocal::rfc_3339();
+
     tracing_subscriber::fmt()
         .compact()
         .with_file(true)
         .with_line_number(true)
         .with_target(false)
+        .with_timer(timeformat)
         .finish()
         .init();
 

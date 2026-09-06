@@ -44,6 +44,7 @@ pub enum FrigateError {
         status: reqwest::StatusCode,
         body: String,
     },
+    SnapshotMissing,
 }
 
 impl std::error::Error for FrigateError {
@@ -54,6 +55,7 @@ impl std::error::Error for FrigateError {
             FrigateError::RequestFailed(e) => Some(e),
             FrigateError::SerializationFailed(e) => Some(e),
             FrigateError::BadResponse { .. } => None,
+            FrigateError::SnapshotMissing => None,
         }
     }
 }
@@ -68,6 +70,7 @@ impl fmt::Display for FrigateError {
             FrigateError::BadResponse { status, body } => {
                 write!(f, "Received bad response, status: {status}, body: {body}")
             }
+            FrigateError::SnapshotMissing => write!(f, "Snapshot missing"),
         }
     }
 }
