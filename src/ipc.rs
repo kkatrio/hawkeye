@@ -2,6 +2,7 @@ use std::io;
 use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::time::Duration;
+use tracing::{error, info, warn};
 
 /*
  * new generic event           # 1010
@@ -36,27 +37,34 @@ impl NewEvent {
     }
 }
 
-// printf "\x01\x00\x00\x05" | nc 127.0.0.1 8080
-pub async fn send_alarm_notification(message: NewEvent) -> std::io::Result<()> {
-    // note: use 0.0.0.0 from the host
-    let mut addrs_iter = "olympus:8080".to_socket_addrs()?;
-    let addr = addrs_iter
-        .next()
-        .expect("addr must be created out of the domain");
-    // TODO: persist connection
-    let mut stream = TcpStream::connect_timeout(&addr, Duration::from_secs(2))?;
-    println!("connected to olympus");
+pub struct Connection {
+    stream: TcpStream,
+}
 
-    stream.write_all(&message.bytes())?;
-    let mut buf = [0u8; 2];
-    // The reply from olympus is instant since the events there are
-    // handled asynchronously.
-    let _ = stream.read(&mut buf)?;
-    if buf != "ok".as_bytes() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "response is not ok",
-        ));
+impl Connection {
+    pub fn new() -> std::io::Result<Connection> {
+        // note: use 0.0.0.0 from the host
+        let mut addrs_iter = "olympus:8080".to_socket_addrs()?;
+        let addr = addrs_iter
+            .next()
+            .expect("addr must be created out of the domain");
+        let stream = TcpStream::connect_timeout(&addr, Duration::from_secs(2))?;
+        Ok(Connection { stream })
     }
-    Ok(())
+
+    // printf "\x01\x00\x00\x05" | nc 127.0.0.1 8080
+    pub async fn send(mut self, msg: NewEvent) -> std::io::Result<()> {
+        self.stream.write_all(&msg.bytes());
+        let mut buf = [0u8; 2];
+        let _ = self.stream.read_exact(&mut buf)?;
+        if buf != "ok".as_bytes() {
+            // not sure this is ever possible
+            error!("received response from olympus: {:?}", buf);
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "response is not ok",
+            ));
+        }
+        Ok(())
+    }
 }

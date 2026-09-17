@@ -162,6 +162,11 @@ async fn main_mqtt_subscriber(fclient: Arc<frigate::Client>, gclient: Arc<gdrive
         error!("Failed to subscribe: {}", e);
     }
 
+    // we panic for now -- maybe we should not.
+    let connection = ipc::Connection::new().unwrap();
+    info!("connected to olympus");
+    let connection = std::sync::Arc::new(connection);
+
     loop {
         let event = eventloop.poll().await;
 
@@ -179,9 +184,12 @@ async fn main_mqtt_subscriber(fclient: Arc<frigate::Client>, gclient: Arc<gdrive
                 };
                 match fe {
                     frigate::Event::New { after } => {
-                        let res = tokio::spawn(ipc::send_alarm_notification(ipc::NewEvent {
-                            camera: after.camera,
-                        }));
+                        let connection = connection.clone();
+                        let res = tokio::spawn(async move {
+                            connection.send(ipc::NewEvent {
+                                camera: after.camera,
+                            })
+                        });
 
                         if let Err(e) = res.await {
                             error!(
