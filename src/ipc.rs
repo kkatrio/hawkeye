@@ -53,10 +53,10 @@ impl Connection {
     }
 
     // printf "\x01\x00\x00\x05" | nc 127.0.0.1 8080
-    pub async fn send(mut self, msg: NewEvent) -> std::io::Result<()> {
-        self.stream.write_all(&msg.bytes());
+    pub async fn send(&mut self, msg: NewEvent) -> std::io::Result<()> {
+        self.stream.write_all(&msg.bytes())?;
         let mut buf = [0u8; 2];
-        let _ = self.stream.read_exact(&mut buf)?;
+        self.stream.read_exact(&mut buf)?;
         if buf != "ok".as_bytes() {
             // not sure this is ever possible
             error!("received response from olympus: {:?}", buf);
