@@ -153,7 +153,18 @@ async fn connect_frigate() -> frigate::Client {
     }
 }
 
-async fn main_mqtt_subscriber(fclient: Arc<frigate::Client>, gclient: Arc<gdrive::GClient>) {
+enum Cmd {
+    Send(
+        ipc::NewEvent,
+        tokio::sync::oneshot::Sender<std::io::Result<()>>,
+    ),
+}
+
+async fn main_mqtt_subscriber(
+    fclient: Arc<frigate::Client>,
+    gclient: Arc<gdrive::GClient>,
+    tx: std::sync::mpsc::Sender<Cmd>,
+) {
     let mut mqttoptions = MqttOptions::new("hawkeye", "mosquitto", 1883);
     mqttoptions.set_keep_alive(Duration::from_secs(5));
 
@@ -161,11 +172,6 @@ async fn main_mqtt_subscriber(fclient: Arc<frigate::Client>, gclient: Arc<gdrive
     if let Err(e) = client.subscribe("frigate/events", QoS::AtMostOnce).await {
         error!("Failed to subscribe: {}", e);
     }
-
-    // we panic for now -- maybe we should not.
-    let connection = ipc::Connection::new().unwrap();
-    info!("connected to olympus");
-    let connection = std::sync::Arc::new(tokio::sync::Mutex::new(connection));
 
     loop {
         let event = eventloop.poll().await;
@@ -184,16 +190,16 @@ async fn main_mqtt_subscriber(fclient: Arc<frigate::Client>, gclient: Arc<gdrive
                 };
                 match fe {
                     frigate::Event::New { after } => {
-                        let connection = connection.clone();
-                        let res = tokio::spawn(async move {
-                            let mut conn = connection.lock().await;
-                            conn.send(ipc::NewEvent {
+                        // use a oneshot channel to get back the result here just for fun
+                        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+                        tx.send(Cmd::Send(
+                            ipc::NewEvent {
                                 camera: after.camera,
-                            })
-                            .await
-                        });
-
-                        if let Err(e) = res.await {
+                            },
+                            reply_tx,
+                        ))
+                        .unwrap();
+                        if let Err(e) = reply_rx.await {
                             error!(
                                 "Alarm notification not sent -- Did not connect to olympus: {}",
                                 e
@@ -235,6 +241,21 @@ async fn main_mqtt_subscriber(fclient: Arc<frigate::Client>, gclient: Arc<gdrive
             Err(e) => {
                 error!("mqtt error: {}", e);
                 tokio::time::sleep(Duration::from_secs(3)).await;
+            }
+        }
+    }
+}
+
+async fn connection_handler(rx: std::sync::mpsc::Receiver<Cmd>) {
+    // we panic for now -- maybe we should not.
+    let mut connection = ipc::Connection::new().unwrap();
+    info!("connected to olympus");
+
+    while let Ok(msg) = rx.recv() {
+        match msg {
+            Cmd::Send(msg, reply) => {
+                let res = connection.send(msg).await;
+                reply.send(res).unwrap();
             }
         }
     }
@@ -285,6 +306,9 @@ async fn main() {
         client.clone(),
     ));
 
-    let mh = tokio::spawn(main_mqtt_subscriber(client.clone(), gclient.clone()));
-    let _ = tokio::join!(mh, lh, ih, dh);
+    let (tx, rx) = std::sync::mpsc::channel();
+    let mh = tokio::spawn(main_mqtt_subscriber(client.clone(), gclient.clone(), tx));
+    let ipch = tokio::spawn(connection_handler(rx));
+
+    let _ = tokio::join!(mh, lh, ih, dh, ipch);
 }
