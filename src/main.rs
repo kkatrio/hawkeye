@@ -163,7 +163,7 @@ enum Cmd {
 async fn main_mqtt_subscriber(
     fclient: Arc<frigate::Client>,
     gclient: Arc<gdrive::GClient>,
-    tx: std::sync::mpsc::Sender<Cmd>,
+    tx: tokio::sync::mpsc::Sender<Cmd>,
 ) {
     let mut mqttoptions = MqttOptions::new("hawkeye", "mosquitto", 1883);
     mqttoptions.set_keep_alive(Duration::from_secs(5));
@@ -192,13 +192,17 @@ async fn main_mqtt_subscriber(
                     frigate::Event::New { after } => {
                         // use a oneshot channel to get back the result here just for fun
                         let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-                        tx.send(Cmd::Send(
-                            ipc::NewEvent {
-                                camera: after.camera,
-                            },
-                            reply_tx,
-                        ))
-                        .unwrap();
+                        if let Err(e) = tx
+                            .send(Cmd::Send(
+                                ipc::NewEvent {
+                                    camera: after.camera,
+                                },
+                                reply_tx,
+                            ))
+                            .await
+                        {
+                            error!("error sending new event to connection thread: {}", e)
+                        }
                         if let Err(e) = reply_rx.await {
                             error!(
                                 "Alarm notification not sent -- Did not connect to olympus: {}",
@@ -246,12 +250,12 @@ async fn main_mqtt_subscriber(
     }
 }
 
-async fn connection_handler(rx: std::sync::mpsc::Receiver<Cmd>) {
-    // we panic for now -- maybe we should not.
+async fn connection_handler(mut rx: tokio::sync::mpsc::Receiver<Cmd>) {
+    // we panic for now -- connection to olympus necessary
     let mut connection = ipc::Connection::new().unwrap();
     info!("connected to olympus");
 
-    while let Ok(msg) = rx.recv() {
+    while let Some(msg) = rx.recv().await {
         match msg {
             Cmd::Send(msg, reply) => {
                 let res = connection.send(msg).await;
@@ -306,7 +310,7 @@ async fn main() {
         client.clone(),
     ));
 
-    let (tx, rx) = std::sync::mpsc::channel();
+    let (tx, rx) = tokio::sync::mpsc::channel(10);
     let mh = tokio::spawn(main_mqtt_subscriber(client.clone(), gclient.clone(), tx));
     let ipch = tokio::spawn(connection_handler(rx));
 

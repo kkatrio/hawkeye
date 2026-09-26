@@ -2,7 +2,7 @@ use std::io;
 use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::time::Duration;
-use tracing::{error, info, warn};
+use tracing::error;
 
 /*
  * new generic event           # 1010

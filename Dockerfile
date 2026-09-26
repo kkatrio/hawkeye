@@ -4,7 +4,6 @@ RUN mkdir /home/hawkeye
 WORKDIR /home/hawkeye
 COPY Cargo.toml .
 COPY src/ src/
-COPY clientsecret.json clientsecret.json
 RUN mkdir media
 
 RUN apk add pkgconfig

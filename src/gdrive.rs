@@ -1,46 +1,12 @@
+use hyper_util::client::legacy::connect::HttpConnector;
 use serde::Deserialize;
 use serde_json::json;
 use std::fmt;
 use tracing::{error, info};
-use yup_oauth2::{InstalledFlowAuthenticator, InstalledFlowReturnMethod};
-
-#[derive(Deserialize)]
-pub struct File {
-    pub id: String,
-    pub name: String,
-    #[serde(rename = "createdTime")]
-    pub created_time: Option<String>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct Files {
-    files: Vec<File>,
-    //next_page_token: String,
-    //kind: String,
-    //incomplete_search: bool,
-}
-
-async fn get_token() -> String {
-    let app_secret = yup_oauth2::read_application_secret("clientsecret.json")
-        .await
-        .expect("clientsecret.json");
-
-    let auth =
-        InstalledFlowAuthenticator::builder(app_secret, InstalledFlowReturnMethod::Interactive)
-            .persist_tokens_to_disk("tokencache.json")
-            .build()
-            .await
-            .unwrap();
-
-    let scopes = &[
-        "https://www.googleapis.com/auth/drive.file",
-        "https://www.googleapis.com/auth/drive.readonly",
-    ];
-
-    let token = auth.token(scopes).await.unwrap();
-    token.token().unwrap().to_string()
-}
+use yup_oauth2::hyper_rustls::HttpsConnector;
+use yup_oauth2::{
+    authenticator::Authenticator, InstalledFlowAuthenticator, InstalledFlowReturnMethod,
+};
 
 #[derive(Debug)]
 pub enum GClientError {
@@ -78,26 +44,90 @@ impl From<reqwest::Error> for GClientError {
     }
 }
 
+#[derive(Deserialize)]
+pub struct File {
+    pub id: String,
+    pub name: String,
+    #[serde(rename = "createdTime")]
+    pub created_time: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Files {
+    files: Vec<File>,
+    //next_page_token: String,
+    //kind: String,
+    //incomplete_search: bool,
+}
+
+const SCOPES: [&str; 2] = [
+    "https://www.googleapis.com/auth/drive.file",
+    "https://www.googleapis.com/auth/drive.readonly",
+];
+
+type AuthClient = Authenticator<HttpsConnector<HttpConnector>>;
+
+async fn get_auth_client() -> AuthClient {
+    let app_secret = yup_oauth2::read_application_secret("clientsecret.json")
+        .await
+        // TODO: handle error
+        .expect("clientsecret.json");
+
+    InstalledFlowAuthenticator::builder(app_secret, InstalledFlowReturnMethod::Interactive)
+        .persist_tokens_to_disk("tokencache.json")
+        .build()
+        .await
+        // TODO: handle error
+        .unwrap()
+}
+
+struct GDriveAuth {
+    auth: AuthClient,
+}
+
+impl GDriveAuth {
+    async fn new() -> Result<Self, GClientError> {
+        let auth = get_auth_client().await;
+        Ok(Self { auth })
+    }
+
+    async fn get_token(&self) -> String {
+        let token = self.auth.token(&SCOPES).await.unwrap();
+        // TODO: handle error
+        token.token().unwrap().to_string()
+    }
+}
+
 pub struct GClient {
     client: reqwest::Client,
     folderid: String,
+    auth: GDriveAuth,
 }
 
 impl GClient {
     pub async fn new() -> Result<Self, GClientError> {
         let client = reqwest::Client::new();
-        let folderid = Self::get_folder_id(&client).await?;
-        Ok(Self { client, folderid })
+        let auth = GDriveAuth::new().await?;
+        let folderid = Self::get_folder_id(&client, &auth).await?;
+        Ok(Self {
+            client,
+            folderid,
+            auth,
+        })
     }
 
-    async fn get_folder_id(client: &reqwest::Client) -> Result<String, GClientError> {
+    async fn get_folder_id(
+        client: &reqwest::Client,
+        auth: &GDriveAuth,
+    ) -> Result<String, GClientError> {
         /*
          set Q "mimeType='application/vnd.google-apps.folder' and name='events' and trashed=false"
          curl --get "https://www.googleapis.com/drive/v3/files" \
                --data-urlencode "q=$Q" \
                -H "Authorization: Bearer $TOKEN"
         */
-        let gtoken = get_token().await;
+        let gtoken = auth.get_token().await;
         let res = client.get("https://www.googleapis.com/drive/v3/files?q=mimeType='application/vnd.google-apps.folder' and name='events' and trashed=false").bearer_auth(&gtoken).send().await?;
         let files: Files = serde_json::from_str(&res.text().await?)?;
 
@@ -120,7 +150,7 @@ impl GClient {
             .part("metadata", metadata)
             .part("media", file_part);
 
-        let gtoken = get_token().await;
+        let gtoken = self.auth.get_token().await;
         self.client
             .post("https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart")
             .bearer_auth(gtoken)
@@ -138,7 +168,7 @@ impl GClient {
                --data-urlencode "q=$Q" \
                -H "Authorization: Bearer $TOKEN"
         */
-        let gtoken = get_token().await;
+        let gtoken = self.auth.get_token().await;
 
         let res = self
             .client
@@ -161,7 +191,7 @@ impl GClient {
                             --data-urlencode "q=$Q" --data-urlencode "orderBy=createdTime" \
                             -H "Authorization: Bearer $TOKEN"
         */
-        let gtoken = get_token().await;
+        let gtoken = self.auth.get_token().await;
         let res = self
             .client
             .get(format!(
@@ -204,7 +234,7 @@ impl GClient {
          set FID "1zg3C2XukF0zf56oVeWJOejpBQZwWFLhe"
          curl -X DELETE "https://www.googleapis.com/drive/v3/files/$FID" -H "Authorization: Bearer $TOKEN"
         */
-        let gtoken = get_token().await;
+        let gtoken = self.auth.get_token().await;
         self.client
             .delete(format!(
                 "https://www.googleapis.com/drive/v3/files/{}",

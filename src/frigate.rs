@@ -166,18 +166,15 @@ impl Client {
         &self,
         build_request: impl Fn(&str) -> reqwest::RequestBuilder,
     ) -> Result<reqwest::Response, FrigateError> {
-        let res = {
-            let token = self.token.lock().await;
-            // RequestFailed is emitted if frigate is missing
-            build_request(&token).send().await?
-        };
+        let token = { self.token.lock().await.clone() };
+        let res = build_request(&token).send().await?;
 
         // if frigate has been restarted refresh the token
         // TODO: log the error, refresh for any kind of error
         if res.status().is_client_error() {
             warn!("unauthenticated. Refreshing token...");
             self.refresh_token().await?;
-            let token = self.token.lock().await;
+            let token = { self.token.lock().await.clone() };
             let res = build_request(&token).send().await?;
             return Ok(res);
         }
