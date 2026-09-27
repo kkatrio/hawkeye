@@ -234,7 +234,7 @@ impl Client {
             .send_with_auth_retry(|token| self.client.get(&url).bearer_auth(token))
             .await?;
 
-        let mut path = PathBuf::from(r"./media");
+        let mut path = PathBuf::from(r"./tmp");
         path.push(format!("{}.jpg", after_event.get_name()));
         let mut file = File::create(&path)?;
         file.write_all(&res.bytes().await?)?;
