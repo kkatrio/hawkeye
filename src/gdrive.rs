@@ -2,7 +2,7 @@ use hyper_util::client::legacy::connect::HttpConnector;
 use serde::Deserialize;
 use serde_json::json;
 use std::fmt;
-use tracing::{error, info};
+use tracing::{debug, error, info};
 use yup_oauth2::hyper_rustls::HttpsConnector;
 use yup_oauth2::{
     authenticator::Authenticator, InstalledFlowAuthenticator, InstalledFlowReturnMethod,
@@ -212,14 +212,14 @@ impl GClient {
             let t = f.created_time.as_ref().unwrap();
             match is_older_than_retention(t) {
                 Ok(true) => {
-                    info!("deleting file: {}", f.name);
+                    debug!("deleting file: {}", f.name);
                     if let Err(e) = self.delete(&f.id).await {
                         error!("error when deleting file: {e}");
                     }
                     count += 1;
                 }
                 Ok(false) => {
-                    info!("keeping file: {}", f.name);
+                    debug!("keeping file: {}", f.name);
                 }
                 Err(e) => {
                     error!("could not parse fetched timestamp: {e}")

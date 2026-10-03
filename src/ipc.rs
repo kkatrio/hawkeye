@@ -2,7 +2,7 @@ use std::io;
 use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::time::Duration;
-use tracing::error;
+use tracing::{error, info};
 
 /*
  * new generic event           # 1010
@@ -15,13 +15,19 @@ use tracing::error;
  * new event cam:anatolika#      1017
  * new event cam:varka#          1018
  */
+
+#[derive(Debug)]
 pub struct NewEvent {
     pub camera: String,
 }
 
 impl NewEvent {
     fn bytes(self) -> [u8; 4] {
-        match &*self.camera {
+        let (_is_replay, cam_name) = match self.camera.strip_prefix("_replay_") {
+            Some(rest) => (true, rest),
+            None => (false, self.camera.as_str()),
+        };
+        match cam_name {
             "mpros" => [1, 0, 1, 1],
             "pisw" => [1, 0, 1, 2],
             "porta" => [1, 0, 1, 3],
@@ -31,9 +37,14 @@ impl NewEvent {
             "anatolika" => [1, 0, 1, 7],
             "varka" => [1, 0, 1, 8],
             _ => {
+                // TODO: remove this, create a testing variant
                 panic!("wrong camera");
             }
         }
+        // TODO
+        //if is_replay {
+        //
+        //}
     }
 }
 
@@ -54,6 +65,7 @@ impl Connection {
 
     // printf "\x01\x00\x00\x05" | nc 127.0.0.1 8080
     pub async fn send(&mut self, msg: NewEvent) -> std::io::Result<()> {
+        info!("connection sending msg: {:?}", msg);
         self.stream.write_all(&msg.bytes())?;
         let mut buf = [0u8; 2];
         self.stream.read_exact(&mut buf)?;

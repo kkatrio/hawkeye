@@ -1,6 +1,6 @@
-use std::error::Error;
 use std::str::FromStr;
-use tracing::{error, info, warn};
+use std::{error::Error, net::TcpListener};
+use tracing::{debug, error, info, instrument, warn};
 use tracing_subscriber::util::SubscriberInitExt;
 
 mod frigate;
@@ -12,6 +12,8 @@ use frigate::FrigateError;
 use std::sync::Arc;
 
 use rumqttc::{AsyncClient, MqttOptions, QoS};
+use std::io::Read;
+use std::net::TcpStream;
 use std::time::Duration;
 
 // lower threshold at 20:00
@@ -78,6 +80,7 @@ fn create_patches(time: &Time) -> Vec<serde_json::Value> {
         .collect()
 }
 
+#[instrument(skip(client))]
 async fn config_updater(expression: &str, time: Time, client: Arc<frigate::Client>) {
     let schedule = cron::Schedule::from_str(expression).expect("cron expression not valid");
     for next_datetime in schedule.upcoming(chrono::Local) {
@@ -101,6 +104,7 @@ async fn config_updater(expression: &str, time: Time, client: Arc<frigate::Clien
     }
 }
 
+#[instrument(skip(gclient))]
 async fn delete_old(gclient: Arc<gdrive::GClient>) {
     let mut interval = 6;
     loop {
@@ -158,8 +162,13 @@ enum Cmd {
         ipc::NewEvent,
         tokio::sync::oneshot::Sender<std::io::Result<()>>,
     ),
+    TestSend(
+        ipc::NewEvent,
+        tokio::sync::oneshot::Sender<std::io::Result<()>>,
+    ),
 }
 
+#[instrument(skip(fclient, gclient, tx))]
 async fn main_mqtt_subscriber(
     fclient: Arc<frigate::Client>,
     gclient: Arc<gdrive::GClient>,
@@ -180,17 +189,18 @@ async fn main_mqtt_subscriber(
             Ok(rumqttc::Event::Incoming(rumqttc::Packet::Publish(p))) => {
                 let fe: frigate::Event = match serde_json::from_slice(&p.payload) {
                     Ok(msg) => {
-                        info!("msg received: {:?}", msg);
+                        info!(msg = ?msg, "msg received");
                         msg
                     }
                     Err(e) => {
-                        error!("could not deserialize event received: {}", e);
+                        error!(error = %e, "could not deserialize event received");
                         continue;
                     }
                 };
                 match fe {
                     frigate::Event::New { after } => {
                         // use a oneshot channel to get back the result here just for fun
+                        // TODO: refactor
                         let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
                         if let Err(e) = tx
                             .send(Cmd::Send(
@@ -201,13 +211,10 @@ async fn main_mqtt_subscriber(
                             ))
                             .await
                         {
-                            error!("error sending new event to connection thread: {}", e)
+                            error!(error = %e, "error sending new event to connection thread")
                         }
                         if let Err(e) = reply_rx.await {
-                            error!(
-                                "Alarm notification not sent -- Did not connect to olympus: {}",
-                                e
-                            )
+                            error!(error = %e, "no reply received");
                         }
                     }
                     frigate::Event::Update { .. } => {
@@ -236,7 +243,7 @@ async fn main_mqtt_subscriber(
             }
             // poll will reconnect to the broker on connection drop
             Ok(rumqttc::Event::Incoming(rumqttc::Packet::ConnAck(..))) => {
-                info!("Connection re-established");
+                info!("MQTT connection (re-)established");
                 if let Err(e) = client.subscribe("frigate/events", QoS::AtMostOnce).await {
                     error!("Failed to subscribe: {}", e);
                 }
@@ -250,6 +257,7 @@ async fn main_mqtt_subscriber(
     }
 }
 
+#[instrument(skip(rx))]
 async fn connection_handler(mut rx: tokio::sync::mpsc::Receiver<Cmd>) {
     // we panic for now -- connection to olympus necessary
     let mut connection = ipc::Connection::new().unwrap();
@@ -258,8 +266,86 @@ async fn connection_handler(mut rx: tokio::sync::mpsc::Receiver<Cmd>) {
     while let Some(msg) = rx.recv().await {
         match msg {
             Cmd::Send(msg, reply) => {
+                debug!("connection handler received Send cmd for msg: {:?}", msg);
                 let res = connection.send(msg).await;
+                // sending the result back to the calling thread
                 reply.send(res).unwrap();
+            }
+            Cmd::TestSend(msg, reply) => {
+                debug!(
+                    "connection handler received TestSend cmd for msg: {:?}",
+                    msg
+                );
+                let res = connection.send(msg).await;
+                // sending the result back to the calling thread
+                reply.send(res).unwrap();
+            }
+        }
+    }
+}
+
+#[instrument(skip(tx, stream))]
+async fn handle_backdoor_connection(
+    mut stream: TcpStream,
+    tx: tokio::sync::mpsc::Sender<Cmd>,
+) -> std::io::Result<()> {
+    loop {
+        let mut buf = [0u8; 128];
+        let n = stream.read(&mut buf)?;
+        if n == 0 {
+            info!("backdoor connection closed");
+            break;
+        }
+        debug!("backdoor read {n} bytes");
+        match std::str::from_utf8(&buf[..n]) {
+            Ok(s) => match s.trim() {
+                "test" => {
+                    info!("read test");
+                    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+                    if let Err(e) = tx
+                        .send(Cmd::TestSend(
+                            ipc::NewEvent {
+                                // TODO: use testing camera once implemented
+                                camera: String::from("pisw"),
+                            },
+                            reply_tx,
+                        ))
+                        .await
+                    {
+                        error!(error = %e, "could not send to ipc connection handler");
+                    }
+                    if let Err(e) = reply_rx.await {
+                        error!(error = %e, "no reply received");
+                    }
+                }
+                other => {
+                    info!("read {other}");
+                }
+            },
+            Err(e) => {
+                error!("invalid utf8: {e}");
+            }
+        }
+    }
+    // returning Ok when connection is closed?
+    Ok(())
+}
+
+#[instrument(skip(tx))]
+async fn backdoor_listener(tx: tokio::sync::mpsc::Sender<Cmd>) {
+    let listener =
+        TcpListener::bind("0.0.0.0:8044").expect("should bind port 8044 for backdoor listener");
+    for stream in listener.incoming() {
+        match stream {
+            Ok(stream) => {
+                let tx = tx.clone();
+                handle_backdoor_connection(stream, tx)
+                    .await
+                    .expect("should handle connection");
+            }
+            Err(e) => {
+                error!("connection failed: {}", e);
+                continue;
             }
         }
     }
@@ -280,6 +366,7 @@ async fn main() {
 
     dotenv::dotenv().ok();
 
+    // TODO: make gdrive connection optional -- handle new() errors
     let gclient = match gdrive::GClient::new().await {
         Ok(gclient) => gclient,
         Err(GClientError::ReqwestError) => {
@@ -311,8 +398,17 @@ async fn main() {
     ));
 
     let (tx, rx) = tokio::sync::mpsc::channel(10);
-    let mh = tokio::spawn(main_mqtt_subscriber(client.clone(), gclient.clone(), tx));
+
+    let mh = tokio::spawn(main_mqtt_subscriber(
+        client.clone(),
+        gclient.clone(),
+        tx.clone(),
+    ));
+
+    // TODO: reconnect if connection has dropped
     let ipch = tokio::spawn(connection_handler(rx));
 
-    let _ = tokio::join!(mh, lh, ih, dh, ipch);
+    let bdh = tokio::spawn(backdoor_listener(tx));
+
+    let _ = tokio::join!(mh, lh, ih, dh, ipch, bdh);
 }

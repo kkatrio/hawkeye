@@ -93,6 +93,7 @@ impl fmt::Display for Review {
     }
 }
 
+#[allow(dead_code)]
 fn timestamp_to_iso(ts: f64) -> String {
     let secs = ts.trunc();
     let iso = Local.timestamp_opt(secs as i64, 0).unwrap();
