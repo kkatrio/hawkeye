@@ -1,3 +1,4 @@
+use std::net::ToSocketAddrs;
 use std::str::FromStr;
 use std::{error::Error, net::TcpListener};
 use tracing::{debug, error, info, instrument, warn};
@@ -16,12 +17,12 @@ use std::io::Read;
 use std::net::TcpStream;
 use std::time::Duration;
 
-// lower threshold at 20:00
+// lower threshold at 19:00
 // increase threshold at 07:00
-// TODO: hardcode sunset / sunrise times
+// TODO: env sunset / sunrise times
 //sec  min   hour   day of month   month   day of week   year
 const RETENTION: i64 = 10 * 24; // hours
-const EVENING_EXPRESSION: &str = "0 0 21 * * * *";
+const EVENING_EXPRESSION: &str = "0 0 19 * * * *";
 const MORNING_EXPRESSION: &str = "0 0 07 * * * *";
 
 struct CameraConfig;
@@ -213,8 +214,18 @@ async fn main_mqtt_subscriber(
                         {
                             error!(error = %e, "error sending new event to connection thread")
                         }
-                        if let Err(e) = reply_rx.await {
-                            error!(error = %e, "no reply received");
+                        match reply_rx.await {
+                            Ok(reply) => match reply {
+                                Ok(_) => {
+                                    info!("no error -- msg sent ok")
+                                }
+                                Err(e) => {
+                                    error!(error = %e, "connection resulted in error");
+                                }
+                            },
+                            Err(e) => {
+                                error!(error = %e, "no reply received from connection handler");
+                            }
                         }
                     }
                     frigate::Event::Update { .. } => {
@@ -259,15 +270,18 @@ async fn main_mqtt_subscriber(
 
 #[instrument(skip(rx))]
 async fn connection_handler(mut rx: tokio::sync::mpsc::Receiver<Cmd>) {
-    // we panic for now -- connection to olympus necessary
-    let mut connection = ipc::Connection::new().unwrap();
+    let mut addrs_iter = "olympus:8080"
+        .to_socket_addrs()
+        .expect("should resolve addr out of str");
+    let addr = addrs_iter.next().expect("should be able to get address");
+    let mut connection = ipc::Connection::new(addr).unwrap();
     info!("connected to olympus");
 
     while let Some(msg) = rx.recv().await {
         match msg {
             Cmd::Send(msg, reply) => {
                 debug!("connection handler received Send cmd for msg: {:?}", msg);
-                let res = connection.send(msg).await;
+                let res = connection.send(msg);
                 // sending the result back to the calling thread
                 reply.send(res).unwrap();
             }
@@ -276,8 +290,7 @@ async fn connection_handler(mut rx: tokio::sync::mpsc::Receiver<Cmd>) {
                     "connection handler received TestSend cmd for msg: {:?}",
                     msg
                 );
-                let res = connection.send(msg).await;
-                // sending the result back to the calling thread
+                let res = connection.send(msg);
                 reply.send(res).unwrap();
             }
         }
@@ -291,7 +304,9 @@ async fn handle_backdoor_connection(
 ) -> std::io::Result<()> {
     loop {
         let mut buf = [0u8; 128];
+        info!("backdoor connection reading");
         let n = stream.read(&mut buf)?;
+        debug!("backdoor done reading");
         if n == 0 {
             info!("backdoor connection closed");
             break;
@@ -300,7 +315,6 @@ async fn handle_backdoor_connection(
         match std::str::from_utf8(&buf[..n]) {
             Ok(s) => match s.trim() {
                 "test" => {
-                    info!("read test");
                     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
                     if let Err(e) = tx
                         .send(Cmd::TestSend(
@@ -314,8 +328,19 @@ async fn handle_backdoor_connection(
                     {
                         error!(error = %e, "could not send to ipc connection handler");
                     }
-                    if let Err(e) = reply_rx.await {
-                        error!(error = %e, "no reply received");
+                    // get the result from the connection send
+                    match reply_rx.await {
+                        Ok(reply) => match reply {
+                            Ok(_) => {
+                                info!("no error -- msg was sent ok")
+                            }
+                            Err(e) => {
+                                error!(error = ?e, "connection resulted in error");
+                            }
+                        },
+                        Err(e) => {
+                            error!(error = %e, "no reply received from connection handler");
+                        }
                     }
                 }
                 other => {
@@ -327,10 +352,11 @@ async fn handle_backdoor_connection(
             }
         }
     }
-    // returning Ok when connection is closed?
+    // returning Ok when connection is closed
     Ok(())
 }
 
+// nc 127.0.0.1 8044
 #[instrument(skip(tx))]
 async fn backdoor_listener(tx: tokio::sync::mpsc::Sender<Cmd>) {
     let listener =
@@ -341,6 +367,7 @@ async fn backdoor_listener(tx: tokio::sync::mpsc::Sender<Cmd>) {
                 let tx = tx.clone();
                 handle_backdoor_connection(stream, tx)
                     .await
+                    // no errors returned here
                     .expect("should handle connection");
             }
             Err(e) => {
@@ -405,7 +432,6 @@ async fn main() {
         tx.clone(),
     ));
 
-    // TODO: reconnect if connection has dropped
     let ipch = tokio::spawn(connection_handler(rx));
 
     let bdh = tokio::spawn(backdoor_listener(tx));
