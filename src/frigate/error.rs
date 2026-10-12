@@ -5,6 +5,7 @@ use std::fmt;
 pub enum ClientError {
     Frigate(FrigateError),
     Io(std::io::Error),
+    TimestampError,
 }
 
 impl fmt::Display for ClientError {
@@ -12,6 +13,7 @@ impl fmt::Display for ClientError {
         match self {
             ClientError::Frigate(e) => write!(f, "Frigate error: {e}"),
             ClientError::Io(e) => write!(f, "Io error: {e}"),
+            ClientError::TimestampError => write!(f, "Timestamp error"),
         }
     }
 }

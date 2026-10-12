@@ -2,10 +2,11 @@ use chrono::{Datelike, Local, TimeZone, Timelike};
 use serde::Deserialize;
 use std::fs::File;
 use std::io::prelude::*;
+use std::path::PathBuf;
 use std::sync::Arc;
-use std::{fmt, path::PathBuf};
 use tokio::sync::Mutex;
-use tracing::{info, warn};
+use tracing::error;
+use tracing::{info, instrument, warn};
 
 mod error;
 pub use error::*;
@@ -32,13 +33,12 @@ pub enum Event {
 }
 
 impl After {
-    // TODO: return a Result
     // hour:min:sec-camera-day:month
-    pub fn get_name(&self) -> String {
+    pub fn get_name(&self) -> Option<String> {
         let dt = Local
             .timestamp_opt(self.start_time.trunc() as i64, 0)
-            .unwrap();
-        format!(
+            .single()?;
+        Some(format!(
             "{}:{}:{}-{}-{}-{}.jpg",
             dt.hour(),
             dt.minute(),
@@ -46,58 +46,8 @@ impl After {
             self.camera,
             dt.day(),
             dt.month(),
-        )
+        ))
     }
-}
-
-#[allow(dead_code)]
-#[derive(Deserialize, Debug)]
-struct Motion {
-    motion: f64,
-    camera: String,
-    start_time: i64,
-}
-
-impl fmt::Display for Motion {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{} -- {} start: {}",
-            self.motion,
-            self.camera,
-            Local.timestamp_opt(self.start_time, 0).unwrap()
-        )
-    }
-}
-
-#[allow(dead_code)]
-#[derive(Deserialize, Debug)]
-pub struct Review {
-    id: String,
-    camera: String,
-    severity: String,
-    start_time: f64,
-    end_time: f64,
-}
-
-impl fmt::Display for Review {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{} -- {} start: {} end: {}",
-            self.id,
-            self.severity,
-            timestamp_to_iso(self.start_time),
-            timestamp_to_iso(self.end_time)
-        )
-    }
-}
-
-#[allow(dead_code)]
-fn timestamp_to_iso(ts: f64) -> String {
-    let secs = ts.trunc();
-    let iso = Local.timestamp_opt(secs as i64, 0).unwrap();
-    iso.to_string()
 }
 
 pub struct Client {
@@ -188,6 +138,7 @@ impl Client {
         Ok(res)
     }
 
+    #[allow(dead_code)]
     async fn get<T>(&self, url: &str) -> Result<Vec<T>, FrigateError>
     where
         T: serde::de::DeserializeOwned,
@@ -210,18 +161,6 @@ impl Client {
         Ok(())
     }
 
-    #[allow(dead_code)]
-    pub async fn get_review(&self) -> Result<Vec<Review>, FrigateError> {
-        let url = format!("http://{}:8971/api/review", self.frigate_ip);
-        self.get(&url).await
-    }
-
-    #[allow(dead_code)]
-    async fn get_motion_activity(&self) -> Result<Vec<Motion>, FrigateError> {
-        let url = format!("http://{}:8971/api/review/activity/motion", self.frigate_ip);
-        self.get(&url).await
-    }
-
     pub async fn get_event_snapshot(&self, after_event: &After) -> Result<PathBuf, ClientError> {
         if !after_event.has_snapshot {
             return Err(ClientError::Frigate(FrigateError::SnapshotMissing));
@@ -236,7 +175,8 @@ impl Client {
             .await?;
 
         let mut path = PathBuf::from(r"./tmp");
-        path.push(format!("{}.jpg", after_event.get_name()));
+        let name = after_event.get_name().ok_or(ClientError::TimestampError)?;
+        path.push(format!("{}.jpg", name));
         let mut file = File::create(&path)?;
         file.write_all(&res.bytes().await?)?;
         Ok(path)
@@ -245,5 +185,95 @@ impl Client {
     pub async fn update_config(&self, config: &serde_json::Value) -> Result<(), FrigateError> {
         let url = format!("http://{}:8971/api/config/set", self.frigate_ip);
         self.put(&url, config).await
+    }
+}
+
+// lower threshold at 19:00
+// increase threshold at 07:00
+// TODO: env sunset / sunrise times
+//sec  min   hour   day of month   month   day of week   year
+pub const EVENING_EXPRESSION: &str = "0 0 19 * * * *";
+pub const MORNING_EXPRESSION: &str = "0 0 07 * * * *";
+
+struct CameraConfig;
+impl CameraConfig {
+    pub const EVENING_THESHOLDS: &[(&str, u16)] = &[
+        ("pisw", 15),
+        ("voreia-eisodos", 15),
+        ("porta", 15),
+        ("deuteri-porta", 15),
+        ("mpros", 15),
+        ("peuko-garage", 15),
+        ("anatolika", 15),
+        ("varka", 15),
+    ];
+
+    pub const MORNING_THESHOLDS: &[(&str, u16)] = &[
+        ("pisw", 30),
+        ("voreia-eisodos", 30),
+        ("porta", 30),
+        ("deuteri-porta", 30),
+        ("mpros", 30),
+        ("peuko-garage", 30),
+        ("anatolika", 30),
+        ("varka", 30),
+    ];
+}
+
+#[derive(Debug)]
+pub enum Time {
+    Morning,
+    Evening,
+}
+
+fn create_patches(time: &Time) -> Vec<serde_json::Value> {
+    let thresholds = match time {
+        Time::Morning => CameraConfig::MORNING_THESHOLDS,
+        Time::Evening => CameraConfig::EVENING_THESHOLDS,
+    };
+    thresholds
+        .iter()
+        .map(|(name, threshold)| {
+            serde_json::json!({
+                "requires_restart": 0,
+                "update_topic": "integer",
+                "config_data": {
+                    "cameras": {
+                        *name: {
+                            "motion": {
+                                "threshold": threshold
+                            }
+                        }
+                    }
+                }
+            })
+        })
+        .collect()
+}
+
+#[instrument(skip(client))]
+pub async fn config_updater(expression: &str, time: Time, client: Arc<Client>) {
+    use std::str::FromStr;
+    // panic if not valid expression
+    let schedule = cron::Schedule::from_str(expression).expect("cron expression not valid");
+    for next_datetime in schedule.upcoming(chrono::Local) {
+        info!(
+            "Upcoming fire time to set the threshold for: {:?} -> {}",
+            &time, next_datetime
+        );
+        // difference will always be positive
+        let seconds_until_next = (next_datetime - chrono::Local::now()).to_std().unwrap();
+        tokio::time::sleep(seconds_until_next).await;
+
+        for patch in create_patches(&time) {
+            match client.update_config(&patch).await {
+                Ok(_) => {
+                    info!("successfully updated configuration");
+                }
+                Err(e) => {
+                    error!("configuration not valid -- update failed: {e}")
+                }
+            }
+        }
     }
 }

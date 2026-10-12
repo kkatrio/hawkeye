@@ -1,140 +1,15 @@
-use std::net::ToSocketAddrs;
-use std::str::FromStr;
-use std::{error::Error, net::TcpListener};
+use rumqttc::{AsyncClient, MqttOptions, QoS};
+use std::io::Read;
+use std::net::TcpListener;
+use std::net::TcpStream;
+use std::sync::Arc;
+use std::time::Duration;
 use tracing::{debug, error, info, instrument, warn};
 use tracing_subscriber::util::SubscriberInitExt;
 
 mod frigate;
 mod gdrive;
 mod ipc;
-
-use crate::gdrive::GClientError;
-use frigate::FrigateError;
-use std::sync::Arc;
-
-use rumqttc::{AsyncClient, MqttOptions, QoS};
-use std::io::Read;
-use std::net::TcpStream;
-use std::time::Duration;
-
-// lower threshold at 19:00
-// increase threshold at 07:00
-// TODO: env sunset / sunrise times
-//sec  min   hour   day of month   month   day of week   year
-const RETENTION: i64 = 10 * 24; // hours
-const EVENING_EXPRESSION: &str = "0 0 19 * * * *";
-const MORNING_EXPRESSION: &str = "0 0 07 * * * *";
-
-struct CameraConfig;
-impl CameraConfig {
-    pub const EVENING_THESHOLDS: &[(&str, u16)] = &[
-        ("pisw", 15),
-        ("voreia-eisodos", 15),
-        ("porta", 15),
-        ("deuteri-porta", 15),
-        ("mpros", 15),
-        ("peuko-garage", 15),
-        ("anatolika", 15),
-        ("varka", 15),
-    ];
-
-    pub const MORNING_THESHOLDS: &[(&str, u16)] = &[
-        ("pisw", 30),
-        ("voreia-eisodos", 30),
-        ("porta", 30),
-        ("deuteri-porta", 30),
-        ("mpros", 30),
-        ("peuko-garage", 30),
-        ("anatolika", 30),
-        ("varka", 30),
-    ];
-}
-
-#[derive(Debug)]
-enum Time {
-    Morning,
-    Evening,
-}
-
-fn create_patches(time: &Time) -> Vec<serde_json::Value> {
-    let thresholds = match time {
-        Time::Morning => CameraConfig::MORNING_THESHOLDS,
-        Time::Evening => CameraConfig::EVENING_THESHOLDS,
-    };
-    thresholds
-        .iter()
-        .map(|(name, threshold)| {
-            serde_json::json!({
-                "requires_restart": 0,
-                "update_topic": "integer",
-                "config_data": {
-                    "cameras": {
-                        *name: {
-                            "motion": {
-                                "threshold": threshold
-                            }
-                        }
-                    }
-                }
-            })
-        })
-        .collect()
-}
-
-#[instrument(skip(client))]
-async fn config_updater(expression: &str, time: Time, client: Arc<frigate::Client>) {
-    let schedule = cron::Schedule::from_str(expression).expect("cron expression not valid");
-    for next_datetime in schedule.upcoming(chrono::Local) {
-        info!(
-            "Upcoming fire time to set the threshold for: {:?} -> {}",
-            &time, next_datetime
-        );
-        let seconds_until_next = (next_datetime - chrono::Local::now()).to_std().unwrap();
-        tokio::time::sleep(seconds_until_next).await;
-
-        for patch in create_patches(&time) {
-            match client.update_config(&patch).await {
-                Ok(_) => {
-                    info!("successfully updated configuration");
-                }
-                Err(e) => {
-                    error!("configuration not valid -- update failed: {e}")
-                }
-            }
-        }
-    }
-}
-
-#[instrument(skip(gclient))]
-async fn delete_old(gclient: Arc<gdrive::GClient>) {
-    let mut interval = 6;
-    loop {
-        info!("deleting old events");
-        match gclient.get_uploaded_events_reverse().await {
-            Ok(files) => {
-                let deleted = gclient.delete_old(&files).await;
-                info!("deleted: {deleted} files");
-                // list gdrive api fetches 100 events
-                if deleted == 100 {
-                    warn!("more than 100 files to delete -- changing delete interval to 1 hour.");
-                    interval = 1;
-                } else if deleted < 100 && interval == 1 {
-                    warn!("deleted less than 100 -- changing delete interval back to 6 hours.");
-                    interval = 6;
-                }
-            }
-            Err(GClientError::ReqwestError) => {
-                error!("request error");
-                panic!();
-            }
-            Err(GClientError::SerdeError(e)) => {
-                error!("serde error: {e}");
-                panic!();
-            }
-        };
-        tokio::time::sleep(std::time::Duration::from_hours(interval)).await;
-    }
-}
 
 async fn connect_frigate() -> frigate::Client {
     loop {
@@ -143,15 +18,8 @@ async fn connect_frigate() -> frigate::Client {
                 info!("Connected to frigate");
                 return client;
             }
-            Err(FrigateError::LoginFailed(e)) => {
-                error!("Could not reach frigate: {e}, {:?}", e.source());
-                // keep restarting until able to login.
-            }
-            Err(FrigateError::TokenMissing) => {
-                error!("Frigate did not issue token");
-            }
-            Err(_) => {
-                unreachable!()
+            Err(e) => {
+                error!(error = ?e, "Could not connect to frigate");
             }
         };
         tokio::time::sleep(std::time::Duration::from_secs(10)).await;
@@ -172,7 +40,7 @@ enum Cmd {
 #[instrument(skip(fclient, gclient, tx))]
 async fn main_mqtt_subscriber(
     fclient: Arc<frigate::Client>,
-    gclient: Arc<gdrive::GClient>,
+    gclient: Option<Arc<gdrive::GClient>>,
     tx: tokio::sync::mpsc::Sender<Cmd>,
 ) {
     let mut mqttoptions = MqttOptions::new("hawkeye", "mosquitto", 1883);
@@ -180,7 +48,7 @@ async fn main_mqtt_subscriber(
 
     let (client, mut eventloop) = AsyncClient::new(mqttoptions, 10);
     if let Err(e) = client.subscribe("frigate/events", QoS::AtMostOnce).await {
-        error!("Failed to subscribe: {}", e);
+        error!(error = ?e, "Failed to subscribe");
     }
 
     loop {
@@ -234,16 +102,19 @@ async fn main_mqtt_subscriber(
                     frigate::Event::End { after } => {
                         match fclient.get_event_snapshot(&after).await {
                             Ok(path) => {
-                                let event_name = after.get_name();
-                                match gclient.upload(&event_name, path).await {
-                                    Ok(_) => {
-                                        info!("uploaded: {}", event_name);
-                                    }
-                                    Err(e) => {
-                                        error!("Error: Did not upload event to gdrive: {}", e);
-                                        continue;
-                                    }
-                                };
+                                if let Some(gclient) = &gclient {
+                                    match gclient.upload(&after, path).await {
+                                        Ok(event_name) => {
+                                            info!("uploaded: {}", event_name);
+                                        }
+                                        Err(e) => {
+                                            error!("Error: Did not upload event to gdrive: {}", e);
+                                            continue;
+                                        }
+                                    };
+                                } else {
+                                    warn!("no gdrive connection");
+                                }
                             }
                             Err(e) => {
                                 error!("Did not get event snapshot: {}", e);
@@ -269,12 +140,10 @@ async fn main_mqtt_subscriber(
 }
 
 #[instrument(skip(rx))]
-async fn connection_handler(mut rx: tokio::sync::mpsc::Receiver<Cmd>) {
-    let mut addrs_iter = "olympus:8080"
-        .to_socket_addrs()
-        .expect("should resolve addr out of str");
-    let addr = addrs_iter.next().expect("should be able to get address");
-    let mut connection = ipc::Connection::new(addr).unwrap();
+async fn connection_handler(addr: &str, mut rx: tokio::sync::mpsc::Receiver<Cmd>) {
+    // loops until connected.
+    // if not connected, the received won't be able to recv
+    let mut connection = ipc::Connection::new(addr);
     info!("connected to olympus");
 
     while let Some(msg) = rx.recv().await {
@@ -283,7 +152,8 @@ async fn connection_handler(mut rx: tokio::sync::mpsc::Receiver<Cmd>) {
                 debug!("connection handler received Send cmd for msg: {:?}", msg);
                 let res = connection.send(msg);
                 // sending the result back to the calling thread
-                reply.send(res).unwrap();
+                // if the caller has dropped we do not care about the error
+                let _ = reply.send(res);
             }
             Cmd::TestSend(msg, reply) => {
                 debug!(
@@ -291,12 +161,13 @@ async fn connection_handler(mut rx: tokio::sync::mpsc::Receiver<Cmd>) {
                     msg
                 );
                 let res = connection.send(msg);
-                reply.send(res).unwrap();
+                let _ = reply.send(res);
             }
         }
     }
 }
 
+// returns when read 0 bytes (connection closes)
 #[instrument(skip(tx, stream))]
 async fn handle_backdoor_connection(
     mut stream: TcpStream,
@@ -306,7 +177,6 @@ async fn handle_backdoor_connection(
         let mut buf = [0u8; 128];
         info!("backdoor connection reading");
         let n = stream.read(&mut buf)?;
-        debug!("backdoor done reading");
         if n == 0 {
             info!("backdoor connection closed");
             break;
@@ -365,10 +235,9 @@ async fn backdoor_listener(tx: tokio::sync::mpsc::Sender<Cmd>) {
         match stream {
             Ok(stream) => {
                 let tx = tx.clone();
-                handle_backdoor_connection(stream, tx)
-                    .await
-                    // no errors returned here
-                    .expect("should handle connection");
+                if let Err(e) = handle_backdoor_connection(stream, tx).await {
+                    error!(error = ?e, "read error");
+                }
             }
             Err(e) => {
                 error!("connection failed: {}", e);
@@ -393,48 +262,49 @@ async fn main() {
 
     dotenv::dotenv().ok();
 
-    // TODO: make gdrive connection optional -- handle new() errors
-    let gclient = match gdrive::GClient::new().await {
-        Ok(gclient) => gclient,
-        Err(GClientError::ReqwestError) => {
-            error!("request error");
-            panic!("no connection to gdrive");
-        }
-        Err(GClientError::SerdeError(e)) => {
-            error!("serde error: {e}");
-            panic!();
-        }
-    };
-    let gclient = Arc::new(gclient);
-
-    let dh = tokio::spawn(delete_old(gclient.clone()));
-
+    // connection to frigate is necessary. Loop until connected.
     let client = connect_frigate().await;
     let client = Arc::new(client);
-
-    let lh = tokio::spawn(config_updater(
-        EVENING_EXPRESSION,
-        Time::Evening,
-        client.clone(),
-    ));
-
-    let ih = tokio::spawn(config_updater(
-        MORNING_EXPRESSION,
-        Time::Morning,
-        client.clone(),
-    ));
-
+    // send from mqtt main thread (and from backdoor) to ipc thread
     let (tx, rx) = tokio::sync::mpsc::channel(10);
 
-    let mh = tokio::spawn(main_mqtt_subscriber(
+    let mut set = tokio::task::JoinSet::new();
+
+    // connect to gdrive
+    let gclient = match gdrive::GClient::new().await {
+        Ok(gclient) => {
+            let gclient = Arc::new(gclient);
+            set.spawn(gdrive::delete_old(gclient.clone()));
+            Some(gclient)
+        }
+        Err(e) => {
+            error!("error attempting to connect to gdrive: {}", e);
+            None
+        }
+    };
+
+    // subscribe to frigate events. gclient is optional
+    set.spawn(main_mqtt_subscriber(
         client.clone(),
         gclient.clone(),
         tx.clone(),
     ));
 
-    let ipch = tokio::spawn(connection_handler(rx));
+    // backdoor
+    set.spawn(backdoor_listener(tx));
 
-    let bdh = tokio::spawn(backdoor_listener(tx));
+    // ipc
+    set.spawn(connection_handler("olympus:8080", rx));
 
-    let _ = tokio::join!(mh, lh, ih, dh, ipch, bdh);
+    // config update
+    set.spawn(frigate::config_updater(
+        frigate::EVENING_EXPRESSION,
+        frigate::Time::Evening,
+        client.clone(),
+    ));
+    set.spawn(frigate::config_updater(
+        frigate::MORNING_EXPRESSION,
+        frigate::Time::Morning,
+        client.clone(),
+    ));
 }

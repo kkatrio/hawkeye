@@ -1,5 +1,6 @@
 use std::io;
 use std::io::{Read, Write};
+use std::net::ToSocketAddrs;
 use std::net::{SocketAddr, TcpStream};
 use std::time::Duration;
 use tracing::{debug, error, info};
@@ -54,24 +55,40 @@ pub struct Connection {
 }
 
 impl Connection {
-    pub fn new(addr: SocketAddr) -> std::io::Result<Connection> {
+    pub fn new(addr: &str) -> Connection {
+        let mut attempt = 0;
+        let addr = loop {
+            match addr.to_socket_addrs() {
+                Ok(mut addr_it) => match addr_it.next() {
+                    Some(a) => break a,
+                    None => {
+                        error!("empty socket addr iterator");
+                    }
+                },
+                Err(e) => {
+                    error!(error = ?e, "could not resolve olympus");
+                    std::thread::sleep(Duration::from_millis(100 * 2u64.pow(attempt.min(6))));
+                }
+            };
+            attempt += 1;
+        };
+
         let mut attempt = 0;
         loop {
             if attempt != 0 {
                 std::thread::sleep(Duration::from_millis(100 * 2u64.pow(attempt.min(6))));
             }
-            println!("attempt");
+            info!("ipc connection attempt");
 
             match Self::connect(addr) {
                 Ok(stream) => {
-                    return Ok(Connection {
+                    return Connection {
                         stream: Some(stream),
                         addr,
-                    })
+                    }
                 }
                 Err(e) => {
                     error!(error = ?e, "could not connect to olympus");
-                    eprintln!("error: {:?}", e);
                 }
             }
             attempt += 1;
