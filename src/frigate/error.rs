@@ -18,6 +18,16 @@ impl fmt::Display for ClientError {
     }
 }
 
+impl std::error::Error for ClientError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            ClientError::Frigate(e) => Some(e),
+            ClientError::Io(e) => Some(e),
+            ClientError::TimestampError => None,
+        }
+    }
+}
+
 impl From<std::io::Error> for ClientError {
     fn from(error: std::io::Error) -> Self {
         ClientError::Io(error)
