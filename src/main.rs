@@ -168,6 +168,13 @@ impl DriveUploader {
     }
 }
 
+fn parse_cron_expr(key: &str) -> cron::Schedule {
+    dotenv::var(key)
+        .unwrap_or_else(|_| panic!("{key} must be set in .env"))
+        .parse()
+        .unwrap_or_else(|e| panic!("{key} is not a valid cron expression: {e}"))
+}
+
 #[tokio::main]
 async fn main() {
     let timeformat = tracing_subscriber::fmt::time::ChronoLocal::rfc_3339();
@@ -218,15 +225,15 @@ async fn main() {
 
     set.spawn(connection_handler("olympus:8080", rx));
 
-    // modify threshold
-    set.spawn(frigate::config_updater(
-        frigate::EVENING_EXPRESSION,
-        frigate::Time::Evening,
-        client.clone(),
-    ));
-    set.spawn(frigate::config_updater(
-        frigate::MORNING_EXPRESSION,
-        frigate::Time::Morning,
-        client.clone(),
-    ));
+    // modify thresholds
+    for (time, key) in [
+        (frigate::Time::Evening, "MORNING_EXPRESSION"),
+        (frigate::Time::Morning, "EVENING_EXPRESSION"),
+    ] {
+        set.spawn(frigate::config_updater(
+            parse_cron_expr(key),
+            time,
+            client.clone(),
+        ));
+    }
 }

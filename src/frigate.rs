@@ -188,13 +188,6 @@ impl Client {
     }
 }
 
-// lower threshold at 19:00
-// increase threshold at 07:00
-// TODO: env sunset / sunrise times
-//sec  min   hour   day of month   month   day of week   year
-pub const EVENING_EXPRESSION: &str = "0 0 19 * * * *";
-pub const MORNING_EXPRESSION: &str = "0 0 07 * * * *";
-
 struct CameraConfig;
 impl CameraConfig {
     pub const EVENING_THESHOLDS: &[(&str, u16)] = &[
@@ -252,26 +245,22 @@ fn create_patches(time: &Time) -> Vec<serde_json::Value> {
 }
 
 #[instrument(skip(client))]
-pub async fn config_updater(expression: &str, time: Time, client: Arc<Client>) {
-    use std::str::FromStr;
-    // panic if not valid expression
-    let schedule = cron::Schedule::from_str(expression).expect("cron expression not valid");
+pub async fn config_updater(schedule: cron::Schedule, time: Time, client: Arc<Client>) {
     for next_datetime in schedule.upcoming(chrono::Local) {
-        info!(
-            "Upcoming fire time to set the threshold for: {:?} -> {}",
-            &time, next_datetime
-        );
-        // difference will always be positive
-        let seconds_until_next = (next_datetime - chrono::Local::now()).to_std().unwrap();
+        info!("Upcoming fire time to change the threshold {next_datetime}");
+        // difference should be positive
+        let seconds_until_next = (next_datetime - chrono::Local::now())
+            .to_std()
+            .unwrap_or_default(); // default=0
         tokio::time::sleep(seconds_until_next).await;
 
         for patch in create_patches(&time) {
             match client.update_config(&patch).await {
                 Ok(_) => {
-                    info!("successfully updated configuration");
+                    info!("updated configuration");
                 }
                 Err(e) => {
-                    error!("configuration not valid -- update failed: {e}")
+                    error!("configuration update failed: {e}")
                 }
             }
         }
