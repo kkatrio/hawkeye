@@ -1,4 +1,3 @@
-use crate::frigate;
 use hyper_util::client::legacy::connect::HttpConnector;
 use serde::Deserialize;
 use serde_json::json;
@@ -9,6 +8,8 @@ use yup_oauth2::hyper_rustls::HttpsConnector;
 use yup_oauth2::{
     authenticator::Authenticator, InstalledFlowAuthenticator, InstalledFlowReturnMethod,
 };
+
+use crate::frigate;
 
 pub const RETENTION: i64 = 10 * 24; // hours
 

@@ -1,10 +1,7 @@
 use crate::{ipc, Cmd, TaskMessenger};
 use std::io::Read;
-use std::net::TcpListener;
-use std::net::TcpStream;
-use tracing::error;
-use tracing::instrument;
-use tracing::{debug, info};
+use std::net::{TcpListener, TcpStream};
+use tracing::{debug, error, info, instrument};
 
 // returns when read 0 bytes (connection closes)
 #[instrument(skip(messenger, stream))]
@@ -41,7 +38,7 @@ async fn handle_backdoor_connection(
             }
         }
     }
-    // returning Ok when connection is closed
+    // connection closed
     Ok(())
 }
 

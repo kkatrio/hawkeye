@@ -59,7 +59,7 @@ impl TaskMessenger {
                 "no reply received from connection handler",
             )
         })?
-        // returning the io::Result of the connection.send
+        // returning the io::Result of connection.send
     }
 }
 
@@ -215,7 +215,7 @@ async fn main() {
         }
     };
 
-    // send from mqtt main thread (and from backdoor) to ipc thread
+    // communicate between mqtt main thread (and backdoor) to ipc connection thread
     let (tx, rx) = tokio::sync::mpsc::channel(10);
     let messenger = TaskMessenger { tx };
 
