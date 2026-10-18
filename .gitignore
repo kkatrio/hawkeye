@@ -1,5 +1,4 @@
 /target
 tokencache.json
 clientsecret.json
-/media
 .env
