@@ -164,9 +164,21 @@ mod tests {
     use crate::ipc;
     use std::io::{Read, Write};
     use std::net::TcpListener;
+    use tracing::info;
+    use tracing_subscriber::util::SubscriberInitExt;
 
     #[test]
     fn test_reconnection() {
+        let timeformat = tracing_subscriber::fmt::time::ChronoLocal::rfc_3339();
+        tracing_subscriber::fmt()
+            .compact()
+            .with_file(true)
+            .with_line_number(true)
+            .with_target(false)
+            .with_timer(timeformat)
+            .finish()
+            .init();
+
         // spawn a listener -- the remote end
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
@@ -179,7 +191,9 @@ mod tests {
         });
 
         // connect to the remote end
-        let mut connection = ipc::Connection::new(addr).unwrap();
+        let adr = addr.to_string();
+        info!(adr = %adr, "connected to remote end");
+        let mut connection = ipc::Connection::new(&adr);
         // send a test msg
         connection
             .send(ipc::NewEvent {
