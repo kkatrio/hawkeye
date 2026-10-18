@@ -63,9 +63,10 @@ impl Client {
     pub async fn new() -> Result<Self, FrigateError> {
         let client = reqwest::Client::new();
 
-        let frigate_user = dotenv::var("FRIGATE_ADMIN").expect("FRIGATE_ADMIN must be set in .env");
-        let frigate_pass = dotenv::var("FRIGATE_PASS").expect("FRIGATE_PASS must be set in .env");
-        let frigate_ip = dotenv::var("FRIGATE_IP").expect("FRIGATE_IP must be set in .env");
+        let frigate_user =
+            dotenvy::var("FRIGATE_ADMIN").expect("FRIGATE_ADMIN must be set in .env");
+        let frigate_pass = dotenvy::var("FRIGATE_PASS").expect("FRIGATE_PASS must be set in .env");
+        let frigate_ip = dotenvy::var("FRIGATE_IP").expect("FRIGATE_IP must be set in .env");
 
         let token = Self::login(&client, &frigate_user, &frigate_pass, &frigate_ip).await?;
 

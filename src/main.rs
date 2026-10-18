@@ -169,7 +169,7 @@ impl DriveUploader {
 }
 
 fn parse_cron_expr(key: &str) -> cron::Schedule {
-    dotenv::var(key)
+    dotenvy::var(key)
         .unwrap_or_else(|_| panic!("{key} must be set in .env"))
         .parse()
         .unwrap_or_else(|e| panic!("{key} is not a valid cron expression: {e}"))
@@ -188,7 +188,7 @@ async fn main() {
         .finish()
         .init();
 
-    dotenv::dotenv().ok();
+    dotenvy::dotenv().ok();
 
     // connection to frigate is necessary. wait until connected.
     let client = connect_frigate().await;
